@@ -24,8 +24,8 @@ OUT_VWAP.mkdir(parents=True, exist_ok=True)
 OUT_HMM.mkdir(parents=True, exist_ok=True)
 
 # backtest parameters
-START = "2007-01-01"
-END = "2018-12-31"           # fallback data ends 2018; yfinance will extend further
+START = "2008-12-31"
+END = "2019-02-22"           # real-data coverage
 VWAP_WINDOW = 20
 COMMISSION_BPS = 1.0
 SLIPPAGE_BPS = 0.5

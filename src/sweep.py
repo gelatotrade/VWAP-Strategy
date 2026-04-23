@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "results" / "sweep"
 OUT.mkdir(parents=True, exist_ok=True)
 
-START, END = "2007-01-01", "2018-12-31"
+START, END = "2008-12-31", "2019-02-22"
 COMM, SLIP = 1.0, 0.5
 
 WINDOWS = [10, 20, 50]
