@@ -4,4 +4,4 @@ __pycache__/
 .env
 .ipynb_checkpoints/
 data/*.csv
-!data/_SPY_SOURCE.csv
+!data/README.md
