@@ -129,3 +129,51 @@ def regime_modulated_signal(vwap_sig: pd.Series,
     # HV_BEAR: flat
     out[regs == "HV_BEAR"] = 0.0
     return out
+
+
+# ---------------------------------------------------------------------------
+# Hybrid momentum + mean-reversion, switched per regime
+# ---------------------------------------------------------------------------
+# Default regime -> strategy map, grounded in Giner & Zakamulin (2023) and
+# the practitioner rule "momentum in calm trends, mean-rev in chop".
+DEFAULT_HYBRID_MAP = {
+    "LV_BULL": "momentum",      # calm uptrend — ride it
+    "HV_BULL": "mean_rev",      # bullish but choppy — fade extremes
+    "LV_BEAR": "mean_rev",      # bearish drift, bounces to fade
+    "HV_BEAR": "flat",          # crisis chop — step aside
+}
+
+
+def hybrid_regime_signal(momentum_sig: pd.Series,
+                         mean_rev_sig: pd.Series,
+                         regimes: pd.Series,
+                         mapping: dict[str, str] | None = None) -> pd.Series:
+    """Select momentum or mean-reversion signal per regime.
+
+    `mapping` values must be one of: 'momentum', 'mean_rev', 'both', 'flat'.
+      - 'momentum' : use momentum_sig
+      - 'mean_rev' : use mean_rev_sig
+      - 'both'     : average of the two (implicit combination)
+      - 'flat'     : 0
+    """
+    mapping = mapping or DEFAULT_HYBRID_MAP
+    idx = regimes.index
+    mom = momentum_sig.reindex(idx).fillna(0.0)
+    mr = mean_rev_sig.reindex(idx).fillna(0.0)
+
+    out = pd.Series(0.0, index=idx)
+    for regime, action in mapping.items():
+        mask = (regimes == regime)
+        if not mask.any():
+            continue
+        if action == "momentum":
+            out[mask] = mom[mask]
+        elif action == "mean_rev":
+            out[mask] = mr[mask]
+        elif action == "both":
+            out[mask] = 0.5 * (mom[mask] + mr[mask])
+        elif action == "flat":
+            out[mask] = 0.0
+        else:
+            raise ValueError(f"Unknown hybrid action: {action}")
+    return out.clip(-1, 1)
