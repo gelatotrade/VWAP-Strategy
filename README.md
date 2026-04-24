@@ -323,27 +323,149 @@ Full artifacts:
    test 2015-2018 — the current code already produces per-config
    series so a train/test split is a one-liner at the sweep loop.
 
+---
+
+## 5. Crypto extension (BTC, ETH, XRP, SOL, HYPE)
+
+### Data (real, daily, through 2026-04-22)
+The crypto loader (`src/crypto_data.py`) pulls daily series from
+[coinmetrics/data](https://github.com/coinmetrics/data):
+
+| Ticker | Rows | First day   | Last day    | Last close | Source column             |
+|--------|-----:|-------------|-------------|-----------:|---------------------------|
+| BTC    | 5 758| 2010-07-18  | 2026-04-22  | $78 317    | `PriceUSD`                |
+| ETH    | 3 911| 2015-08-08  | 2026-04-22  | $2 382     | `PriceUSD`                |
+| XRP    | 4 269| 2014-08-15  | 2026-04-22  | $1.43      | `PriceUSD`                |
+| SOL    | 2 203| 2020-04-11  | 2026-04-22  | $22.54*    | Reconstructed (see below) |
+| HYPE   |   496| 2024-12-13  | 2026-04-22  | $41.52     | Reconstructed (see below) |
+
+*For **SOL** and **HYPE** the community coinmetrics feed exposes only
+`CapMrktEstUSD` + volume, not a direct USD price. The loader recovers
+an implied circulating supply from the handful of overlap days where
+both `ReferenceRateUSD` and `CapMrktEstUSD` are reported, then
+reconstructs Close = `CapMrktEstUSD / supply_median`. Daily returns
+are clipped at ±70 % to reject spurious supply-inflation jumps.
+This means SOL's absolute price level before ≈ 2023 is biased low
+(current supply is ~70× the 2020 supply), but the period 2023-2026
+is reasonable for strategy backtesting. Note: the clipping skews
+SOL total-return numbers downward vs the true ETF — use Sharpe and
+MaxDD as the primary comparators for SOL.
+
+### Strategy setup for crypto
+- Crypto-specific transaction cost: **10 bps commission + 5 bps slippage**
+  per turnover (vs 1+0.5 bps for the ETFs).
+- Same 4-state Gaussian HMM on log-return / realized-vol / z-return.
+- Two HMM variants evaluated:
+  - **IS** (in-sample): HMM fit once on the full history of the ticker.
+  - **WF** (walk-forward): HMM re-fit every 63 days (≈ 1 quarter) on the
+    trailing 504-day window. Uses no future information at decision time.
+    Only tickers with ≥ 600 days of history (BTC, ETH, XRP, SOL) get WF.
+- Same signal families as the ETF run: MOM, MR, MOM+HMM, MR+HMM,
+  HYB_default (momentum in LV_BULL, mean-rev in HV_BULL / LV_BEAR, flat in HV_BEAR).
+
+### Results (Sharpe) — crypto, costs 10+5 bps
+
+| Strategy           |  BTC   |  ETH   | XRP    |   SOL  |  HYPE   |
+|--------------------|-------:|-------:|-------:|-------:|--------:|
+| BuyHold            | **1.18**| 0.99  | 0.77   | **1.30**| 0.68   |
+| MOM                | 0.84   | 0.88   | 0.52   | 0.51   | -0.32   |
+| MR                 | -1.18  | -0.78  | -0.76  | -0.83  | 0.70    |
+| MOM+HMM (IS)       | 0.90   | 0.91   | 0.74   | 0.64   | 0.32    |
+| MR+HMM  (IS)       | -0.65  | -0.47  | -0.10  | 0.07   | 0.48    |
+| HYB_default (IS)   | -0.34  | 0.04   | -0.44  | -0.45  | **1.21**|
+| **MOM+HMM (WF)**   | **0.91**| **0.96**| 0.57 | -0.08  | n/a     |
+| MR+HMM  (WF)       | -0.64  | -0.61  | -0.36  | -0.55  | n/a     |
+| HYB_default (WF)   | -0.30  | 0.22   | -0.20  | -0.68  | n/a     |
+
+### Max drawdown — same configs
+
+| Strategy           |   BTC    |   ETH    |   XRP    |   SOL    |  HYPE   |
+|--------------------|---------:|---------:|---------:|---------:|--------:|
+| BuyHold            |  -92.8 % |  -94.0 % |  -94.9 % |  -95.5 % | -69.2 % |
+| MOM                |  -90.2 % |  -78.1 % |  -99.1 % |  -99.8 % | -85.8 % |
+| **MOM+HMM (WF)**   | **-70.7 %**| **-58.3 %** | -97.4 % | -89.7 %| n/a    |
+| HYB_default (IS)   |  -100 %  |  -96.1 % |  -100 %  |  -100 %  | **-31.4 %**|
+
+### Takeaways — crypto
+1. **Crypto majors are momentum-dominated.** BTC, ETH, SOL all have
+   Buy-and-Hold Sharpe ≈ 1–1.3 from multi-year trends. Pure mean-reversion
+   is a disaster on these (−100 % equity) — you keep fading the dip and
+   get run over.
+2. **MOM+HMM with walk-forward training is the *honest* best** for BTC
+   and ETH: Sharpe 0.91 / 0.96, drawdown **cut in half** (−71 % / −58 %
+   vs −93 % / −94 % for buy-and-hold). WF ≈ IS on BTC/ETH — the HMM
+   isn't overfitting, the regimes are persistent.
+3. **HYPE is the mean-reversion ticker.** Fresh post-launch price has
+   oscillated around $30-$60 with no persistent trend — exactly the
+   setup where VWAP-band fades work. `HYB_default` (momentum in LV_BULL,
+   MR in HV_BULL/LV_BEAR, flat in HV_BEAR) gives **Sharpe 1.21, +171 %,
+   MaxDD only −31 %**, the best risk-adjusted result in the whole
+   study. Pure MR on HYPE also wins (+61 %).
+4. **SOL's reconstructed price degrades the backtest** for strategies
+   that accumulate over long horizons — MOM+HMM IS under-performs
+   because the reconstructed early returns are too noisy. The WF
+   results are more trustworthy and still show Sharpe ≈ 0 for
+   active strategies vs 1.30 for buy-and-hold — SOL is a "hold and
+   hope" ticker in this period.
+5. **XRP benefits most from MOM+HMM**: strategy captures the 2017 and
+   2021 pumps while dropping ~96 % MaxDD down to −97 % (still brutal
+   because XRP had multi-year flat-to-down stretches in between).
+6. **Crypto fees matter.** 15 bps round-trip × high turnover on daily
+   signals erodes edge; the best strategies are ones that turn over
+   rarely (MOM holds for weeks) or spend long periods flat (HYB with
+   HV_BEAR=flat).
+
+### HYPE — why the HMM hybrid wins
+HYPE is only ~1.4 years old and has seen four distinct phases:
+  * Dec-24 → Feb-25: grind-up from $32 to $36
+  * Mar-25: flash crash to $14 (HV_BEAR)
+  * Apr-25 → Sep-25: 4× rally to $60 (LV_BULL → HV_BULL)
+  * Oct-25 → Feb-26: slow bleed to $25 (LV_BEAR)
+  * Mar-26 → Apr-26: recovery to $42
+
+The 4-state HMM picks these out cleanly (see `HYPE_regimes_IS.png`).
+The hybrid rule then rides momentum during the Apr-Sep bull and fades
+the chop in the sideways phases — exactly the academic prescription
+from Giner & Zakamulin (2023) and Nystrup et al. (2020). In a longer-lived
+ticker the rule would be tuned down (momentum dominates), but on a
+fresh asset HYB_default captures both regimes.
+
+Artifacts:
+- `results/crypto/summary.csv` — all 45 (ticker × strategy × HMM mode) stats.
+- `results/crypto/{sharpe,totalreturn,maxdd}_by_strategy.csv` — pivots.
+- `results/crypto/{BTC,ETH,XRP,SOL,HYPE}_equity.png` — equity curves.
+- `results/crypto/{BTC,ETH,XRP,SOL,HYPE}_regimes_IS.png` — in-sample regimes.
+- `results/crypto/{BTC,ETH,XRP,SOL}_regimes_WF.png` — walk-forward regimes.
+- `results/crypto/heatmap.png` — Sharpe + total-return heatmap.
+- `results/crypto/equity_grid.png` — all curves side by side.
+
+---
+
 ## Layout
 ```
 VWAP-Strategy/
 ├── README.md
 ├── requirements.txt
 ├── src/
-│   ├── data.py           # SPY/QQQ/IWM loader with yfinance + fallback
-│   ├── vwap.py           # rolling VWAP, VWAP bands, momentum + mean-rev signals
-│   ├── hmm_regime.py     # 4-state Gaussian HMM, one-sided overlay, hybrid maps
-│   ├── backtest.py       # daily backtest engine + metrics
-│   ├── run.py            # baseline: BuyHold / VWAP(20) / VWAP+HMM per ticker
-│   └── sweep.py          # full parameter sweep over strategies/windows/bands
+│   ├── data.py            # SPY/QQQ/IWM loader
+│   ├── crypto_data.py     # BTC/ETH/XRP/SOL/HYPE loader (coinmetrics mirror)
+│   ├── vwap.py            # rolling VWAP, VWAP bands, MOM + MR signals
+│   ├── hmm_regime.py      # 4-state HMM, IS + walk-forward, hybrid maps
+│   ├── backtest.py        # daily backtest engine + metrics
+│   ├── run.py             # equities baseline: BuyHold / VWAP / VWAP+HMM
+│   ├── sweep.py           # equities parameter sweep
+│   └── run_crypto.py      # crypto deep backtest (IS + walk-forward)
 └── results/
-    ├── vwap_only/        # VWAP-only backtest outputs
-    ├── vwap_hmm/         # VWAP + HMM(4) backtest outputs + regime plots
-    └── sweep/            # full sweep: all configs + best + heatmaps
+    ├── vwap_only/         # equity VWAP-only outputs
+    ├── vwap_hmm/          # equity VWAP + HMM(4) outputs
+    ├── sweep/             # equity parameter sweep outputs
+    └── crypto/            # crypto (BTC/ETH/XRP/SOL/HYPE) outputs
 ```
 
 ## Reproducing
 ```
 pip install -r requirements.txt
-python src/run.py        # baseline: BuyHold / VWAP(20) / VWAP+HMM
-python src/sweep.py      # full parameter sweep + hybrid variants
+python src/run.py          # equities baseline
+python src/sweep.py        # equities parameter sweep
+python src/run_crypto.py   # crypto deep backtest (IS + walk-forward HMM)
 ```

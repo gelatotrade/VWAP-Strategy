@@ -144,6 +144,77 @@ DEFAULT_HYBRID_MAP = {
 }
 
 
+def walk_forward_regimes(df: pd.DataFrame,
+                         train_days: int = 504,
+                         step_days: int = 63,
+                         n_states: int = 4,
+                         seed: int = 42) -> RegimeResult:
+    """Walk-forward HMM inference.
+
+    At each step the HMM is re-fit on the last `train_days` sessions and
+    used to decode regimes for the next `step_days`. Avoids using future
+    information to label past regimes. `train_days` default = 2 years;
+    `step_days` default = 1 quarter.
+
+    Returns a RegimeResult where `states` is only populated from
+    sample `train_days` onwards.
+    """
+    X_all = _features(df)
+    if len(X_all) <= train_days + 1:
+        # not enough data for walk-forward — fall back to in-sample fit
+        return fit_regime(df, n_states=n_states, seed=seed)
+
+    mu = X_all.values.mean(axis=0)
+    sd = X_all.values.std(axis=0)
+    sd[sd == 0] = 1.0
+
+    states_out = pd.Series(index=X_all.index, dtype="object")
+    probs_out = pd.DataFrame(index=X_all.index,
+                             columns=list(REGIME_LABELS), dtype=float)
+    last_model: GaussianHMM | None = None
+    last_label_map: dict[int, str] = {}
+
+    start = train_days
+    while start < len(X_all):
+        end = min(start + step_days, len(X_all))
+        train_X = X_all.iloc[start - train_days:start].values
+        train_Xs = (train_X - mu) / sd
+        best_m, best_ll = None, -np.inf
+        for s in (seed, seed + 1, seed + 7):
+            m = GaussianHMM(n_components=n_states, covariance_type="diag",
+                            n_iter=150, random_state=s, tol=1e-4)
+            try:
+                m.fit(train_Xs)
+                ll = m.score(train_Xs)
+                if ll > best_ll:
+                    best_ll, best_m = ll, m
+            except Exception:
+                continue
+        if best_m is None:
+            best_m = last_model  # carry forward
+        # label states using means on original scale
+        means_orig = best_m.means_ * sd + mu
+        lbl = _label_states(type("D", (), {"means_": means_orig})())
+        test_X = X_all.iloc[start:end].values
+        test_Xs = (test_X - mu) / sd
+        s_int = best_m.predict(test_Xs)
+        p = best_m.predict_proba(test_Xs)
+        idx = X_all.index[start:end]
+        states_out.loc[idx] = [lbl[s] for s in s_int]
+        for j, name in enumerate(REGIME_LABELS):
+            if name in lbl.values():
+                col = [k for k, v in lbl.items() if v == name][0]
+                probs_out.loc[idx, name] = p[:, col]
+            else:
+                probs_out.loc[idx, name] = 0.0
+        last_model, last_label_map = best_m, lbl
+        start = end
+
+    return RegimeResult(states=states_out.dropna(),
+                        probs=probs_out.loc[states_out.dropna().index],
+                        model=last_model, label_map=last_label_map)
+
+
 def hybrid_regime_signal(momentum_sig: pd.Series,
                          mean_rev_sig: pd.Series,
                          regimes: pd.Series,

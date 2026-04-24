@@ -67,6 +67,10 @@ def run_backtest(prices: pd.DataFrame,
     cost = turnover * (commission_bps + slippage_bps) / 10_000.0
     strat_ret = pos * daily_ret - cost
 
+    # If a day's strategy return is <= -100 %, the account is ruined;
+    # floor at -99.5 % so cumprod stays strictly positive (otherwise
+    # negative equity values compound to absurd drawdowns).
+    strat_ret = strat_ret.clip(lower=-0.995)
     equity = (1 + strat_ret).cumprod()
     stats = {
         "CAGR":        _cagr(equity),
